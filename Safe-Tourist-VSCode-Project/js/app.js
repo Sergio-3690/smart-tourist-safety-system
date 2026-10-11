@@ -163,35 +163,11 @@ function onRegisterPassInput(){
   lbl.style.color=res.color;
 }
 function persistSession(role,user){
-  try{
-    if(!user)localStorage.removeItem('sts_session');
-    else localStorage.setItem('sts_session',JSON.stringify({role,id:user.id,email:user.email}));
-  }catch(e){}
+  // Automatic login disabled - clean up any stored session
+  try{localStorage.removeItem('sts_session');}catch(e){}
 }
 function restoreSession(){
-  try{
-    const raw=localStorage.getItem('sts_session');
-    if(!raw)return false;
-    const sess=JSON.parse(raw);
-    if(!sess||!sess.role)return false;
-    if(sess.role==='authority'){
-      S.role='authority';
-      S.user={name:'Safety Authority',email:sess.email||'authority@example.com',id:sess.id||'AUTH-001'};
-      enterApp();
-      return true;
-    }
-    if(sess.role==='tourist'){
-      const t=S.tourists.find(x=>x.id===sess.id||(x.email&&sess.email&&x.email.toLowerCase()===sess.email.toLowerCase()));
-      if(t){
-        S.role='tourist';
-        S.user={...t};
-        enterApp();
-        return true;
-      }
-    }
-  }catch(e){
-    console.warn('Could not restore session:',e);
-  }
+  // Always return false so application never bypasses landing/login screens
   return false;
 }
 function openModal(h){$('modal').innerHTML=h;$('modalBack').classList.remove('hidden');const f=document.querySelector('#modal input');if(f)setTimeout(()=>f.focus(),30)}
@@ -2565,11 +2541,13 @@ function setupRealtimeListeners(){
 }
 
 // ---------- boot ----------
+try{localStorage.removeItem('sts_session');}catch(e){}
+S.user=null;
 function startClock(){const tick=()=>{const t=new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});$('liveClock').textContent=t;$('landingLiveTime').textContent='ACTIVE · '+t+' IST'};tick();setInterval(tick,1000)}
 try{if(localStorage.getItem('sts_theme')==='light'){document.body.classList.add('light');$('themeToggle').textContent='☀'}}catch(e){}
 initSupabase();
 load().then(()=>{
-  restoreSession();
+  showLanding();
 });
 save();
 startClock();
