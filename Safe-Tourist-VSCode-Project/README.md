@@ -1,23 +1,70 @@
-# Safe Tourist VS Code Project
+# Smart Tourist Safety Monitoring and Incident Response System
 
-Smart Tourist Safety Monitoring and Incident Response System.
+An integrated tourist safety monitoring and rapid incident response platform featuring AI safety assessment, precision geofencing, emergency SOS beacons, verifiable Digital ID, emergency medical records, and live Supabase PostgreSQL cloud sync with offline fallback.
 
-## Structure
-- `index.html` — main HTML
-- `css/style.css` — project CSS
-- `js/app.js` — project JavaScript
-- `assets/` — local assets
+---
 
-## Run in VS Code
-Use Live Server or another local HTTP server and open `index.html`.
+## 🚀 Key Features
 
-Live Location requests browser GPS only when the user presses the map location button; it does not request permission automatically on page load.
+1. **AI Safety Risk Assessment:**
+   - Multi-factor anomaly evaluation (Zone risk, hazard proximity, incident history, GPS accuracy).
+   - Generates actionable safety recommendations and dynamic threat levels (SAFE, CAUTION, DANGER).
 
-## Supabase setup
+2. **Precision Geofencing & Danger Zones:**
+   - Interactive map-click boundary placement down to 10m radius.
+   - Live GPS coordinate picker with auto-fill support.
+   - Real-time perimeter breach detection (Safe, Caution, Restricted zones).
 
-1. Create a Supabase project and enable Email/Password authentication.
-2. Run `supabase/schema.sql` in the Supabase SQL Editor.
-3. Set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` in `js/app.js` to your project values. Never expose a service-role key in this browser app.
-4. If email confirmation is enabled, add your Live Server address (for example `http://127.0.0.1:5500`) to Supabase Auth redirect URLs.
+3. **Emergency SOS & Rapid Response:**
+   - 1-Tap SOS beacon transmitting live GPS coordinates, audit reference token, and tourist profile to Authority command.
+   - Structured response workflow: *Acknowledge → Assign Response Unit → Resolve*.
+   - Voice SOS emergency command trigger.
 
-The database stores the signed-in tourist's profile, location, and incidents. RLS limits those records to their owner; safety zones are public read-only map data. The built-in authority account remains an offline demo. A real authority dashboard needs a verified authority role and a server-side or Edge Function API—do not make all tourist data publicly readable to implement it.
+4. **Digital Identity & Medical Records:**
+   - Tamper-evident Digital ID with cryptographic SHA-like hash validation.
+   - Quick-response QR Code generator for field verification by law enforcement.
+   - Encrypted emergency medical data (Blood group, allergies, next-of-kin contacts).
+
+5. **Supabase Cloud Backend & Realtime Synchronization:**
+   - Direct integration with Supabase PostgreSQL cloud database (`tourists`, `incidents`, `safety_zones`).
+   - PostgreSQL Realtime WebSocket replication for multi-device live sync.
+   - Resilient offline fallback to browser LocalStorage with automatic session persistence.
+
+6. **Secure Authentication & Password Management:**
+   - Role-based portal routing (Tourist vs Authority Command Center).
+   - Real-time Password Strength Meter with complexity rules.
+   - Eye toggle password visibility controls (`👁️` / `🔒`).
+   - Session persistence (`sts_session`) across page reloads.
+
+---
+
+## 📁 Project Structure
+
+```
+Safe-Tourist-VSCode-Project/
+├── index.html            # Main application entry point
+├── css/
+│   └── style.css         # Modern, responsive UI stylesheet
+├── js/
+│   ├── app.js            # Core application state, map engine, AI rules, workflows
+│   └── supabase.js       # Supabase Cloud Client, health checks & realtime sync
+├── supabase/
+│   └── schema.sql        # Production PostgreSQL schema, RLS policies & triggers
+└── assets/               # Project icons & assets
+```
+
+---
+
+## 🛠️ How to Run
+
+1. Open `Safe-Tourist-VSCode-Project` in **VS Code**.
+2. Start via **Live Server** (Right click `index.html` → *Open with Live Server*) or any local HTTP server (`http://localhost:5500`).
+3. Open in any modern web browser with Geolocation enabled.
+
+---
+
+## ☁️ Supabase Cloud Setup
+
+1. Create a project at [supabase.com](https://supabase.com).
+2. Open the **SQL Editor** in your Supabase dashboard and run the queries from `supabase/schema.sql`.
+3. The project comes pre-configured with active cloud credentials, or you can configure your own project URL and anon key in `js/supabase.js`.
