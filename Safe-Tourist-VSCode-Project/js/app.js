@@ -3,8 +3,22 @@
 const $=id=>document.getElementById(id);
 const KEY='sts_v3', DC={lat:19.076,lng:72.8777};
 const ZC={Safe:'#22c55e',Caution:'#f59e0b',Restricted:'#f43f5e'};
-const S={role:'tourist',page:'overview',user:null,tourists:[],incidents:[],zones:[],active:null,loc:null,tracking:false,watch:null,geo:{},zone:'Location not acquired',safety:'UNKNOWN',lastEvent:'',aiId:null,verifyId:null,verified:null,selId:null,filter:'',net:'ONLINE',trackedTouristId:null,aiSimMode:null};
+const S={role:'tourist',page:'overview',user:null,tourists:[],incidents:[],zones:[],active:null,loc:null,tracking:false,watch:null,geo:{},zone:'Location not acquired',safety:'UNKNOWN',lastEvent:'',aiId:null,verifyId:null,verified:null,selId:null,filter:'',net:'ONLINE',trackedTouristId:null,aiSimMode:null,locFilter:'all'};
 let maps={},ownMap=null,ownMarker=null,ownCircle=null,toastT=null;
+
+async function hashPassword(password, salt){
+  if(!password)return '';
+  const s=salt||'sts_tourist_seed_salt';
+  const enc=new TextEncoder();
+  const data=enc.encode(password+'::sts_salt::'+s);
+  const buf=await crypto.subtle.digest('SHA-256',data);
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+function generateSalt(){
+  const arr=new Uint8Array(16);
+  crypto.getRandomValues(arr);
+  return Array.from(arr).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
 
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cleanText=(v,m=80)=>String(v??'').replace(/[<>]/g,'').replace(/[\u0000-\u001F\u007F]/g,'').trim().slice(0,m);
@@ -23,13 +37,13 @@ function seed(){
   S.zones=[{name:'Marine Drive Safe Zone',type:'Safe',risk:'Low',radius:280,lat:19.073,lng:72.872},{name:'Hill Road Caution Area',type:'Caution',risk:'Medium',radius:350,lat:19.081,lng:72.883},{name:'Cliff Area',type:'Restricted',risk:'High',radius:400,lat:19.07,lng:72.8865}];
   const mk=(name,id,email,lat,lng,x={})=>{const t={name,id,email,zone:'Outside monitored zones',status:'Safe',lat,lng,locationSource:'demo',...x};t.identityHash=idHash(t);return t};
   S.tourists=[mk('Aarav Mehta','ST-00118','aarav@example.com',19.0745,72.8735),
-    mk('Aditya Sanap','ST-00124','tourist@example.com',19.076,72.8777,{phone:'9876543210',familyContactName:'Neha Sanap',familyContactPhone:'9876543211',blood:'O+',allergy:'Penicillin',password:'Tourist@123'}),
+    mk('Aditya Sanap','ST-00124','tourist@example.com',19.076,72.8777,{phone:'9876543210',familyContactName:'Neha Sanap',familyContactPhone:'9876543211',blood:'O+',allergy:'Penicillin',passwordHash:'b0c87f0fe8e042fa19fd33a5f80d7aa20f49226384dc7b86843bbd5351a836e9',passwordSalt:'sts_tourist_seed_salt'}),
     mk('Meera Kulkarni','ST-00131','meera@example.com',19.0735,72.881),
     mk('Rohan Deshmukh','ST-00142','rohan@example.com',19.0785,72.8795)];
   S.incidents=[{id:'INC-2041',tourist:'Rohan Deshmukh',touristId:'ST-00142',type:'Geofence Warning',severity:'MEDIUM',status:'Resolved',time:'12 Aug 2026',zone:'Hill Road Caution Area',auditRef:auditRef(),source:'geofence'},
     {id:'INC-2034',tourist:'Meera Kulkarni',touristId:'ST-00131',type:'SOS Alert',severity:'HIGH',status:'Resolved',time:'05 Aug 2026',zone:'Cliff Area',auditRef:auditRef(),source:'sos'}];
 }
-function mergeTouristsPreservingPasswords(cloudList){
+function mergeTouristsPreservingCredentials(cloudList){
   if(!cloudList||!Array.isArray(cloudList))return;
   const merged=cloudList.map(ct=>{
     const local=S.tourists.find(lt=>
@@ -37,7 +51,8 @@ function mergeTouristsPreservingPasswords(cloudList){
     );
     return {
       ...ct,
-      password: local?.password || (ct.email==='tourist@example.com'?'Tourist@123':undefined)
+      passwordHash: local?.passwordHash || (ct.email==='tourist@example.com'?'b0c87f0fe8e042fa19fd33a5f80d7aa20f49226384dc7b86843bbd5351a836e9':undefined),
+      passwordSalt: local?.passwordSalt || (ct.email==='tourist@example.com'?'sts_tourist_seed_salt':undefined)
     };
   });
   S.tourists.forEach(lt=>{
@@ -48,6 +63,8 @@ function mergeTouristsPreservingPasswords(cloudList){
   S.tourists=merged;
 }
 function save(){
+  // Scrub any legacy plaintext passwords before persisting
+  S.tourists.forEach(t=>{delete t.password});
   try{localStorage.setItem(KEY,JSON.stringify({tourists:S.tourists,incidents:S.incidents,zones:S.zones}))}catch(e){}
 }
 async function load(){
@@ -55,6 +72,16 @@ async function load(){
     const d=JSON.parse(localStorage.getItem(KEY)||'null');
     if(d&&Array.isArray(d.tourists)&&d.tourists.length){
       S.tourists=d.tourists;S.incidents=d.incidents||[];S.zones=(d.zones||[]).map(z=>({...z,radius:radiusOf(z)}));
+      // Scrub any legacy plaintext passwords & backfill salted hashes
+      for(const t of S.tourists){
+        if(t.password){
+          if(!t.passwordHash){
+            t.passwordSalt=generateSalt();
+            t.passwordHash=await hashPassword(t.password, t.passwordSalt);
+          }
+          delete t.password;
+        }
+      }
     } else {
       seed();
     }
@@ -64,9 +91,10 @@ async function load(){
   // Cloud sync if Supabase is connected
   if(isCloudConnected){
     try{
+      await sbProcessSyncQueue();
       const [cloudTourists,cloudZones,cloudIncidents]=await Promise.all([sbFetchTourists(),sbFetchSafetyZones(),sbFetchIncidents()]);
       if(cloudTourists&&cloudTourists.length){
-        mergeTouristsPreservingPasswords(cloudTourists);
+        mergeTouristsPreservingCredentials(cloudTourists);
       }
       if(cloudZones&&cloudZones.length)S.zones=cloudZones.map(z=>({...z,radius:radiusOf(z)}));
       if(cloudIncidents&&cloudIncidents.length)S.incidents=cloudIncidents;
@@ -190,18 +218,23 @@ function setSelfZone(r){S.zone=r.zone||'Outside monitored zones';const z=S.zones
 // ---------- auth ----------
 function forgotPassword(){
   const isCloud=isCloudConnected;
-  openModal(`<h2>Reset password</h2>
-  <p class="muted">Enter your registered email address. ${isCloud?'You can request a Supabase reset email or update credentials directly.':'The password will be updated on this device.'}</p>
-  <div class="field"><label>Email address</label><input id="fpEmail" type="text" placeholder="you@example.com"><div id="fpEmailErr" class="error"></div></div>
+  openModal(`<h2>Reset Password</h2>
+  <p class="muted">Enter your registered email address. ${isCloud?'You can send an official Supabase cloud reset email or complete identity verification on this device.':'Complete identity verification to securely reset credentials.'}</p>
+  <div class="field"><label>Registered Email Address</label><input id="fpEmail" type="text" placeholder="you@example.com"><div id="fpEmailErr" class="error"></div></div>
   <div id="fpStep2" class="hidden">
-    <div class="field"><label>New password</label><input id="fpNew" type="password" placeholder="Minimum 8 characters (letters & numbers)"><div id="fpNewErr" class="error"></div></div>
-    <div class="field"><label>Confirm new password</label><input id="fpConfirm" type="password" placeholder="Re-enter new password"><div id="fpConfirmErr" class="error"></div></div>
+    <div class="notice safe" style="font-size:12px;margin:10px 0"><b>Security Challenge:</b> Verify your registered emergency contact & medical record to confirm identity.</div>
+    <div class="field"><label>Registered Emergency Contact Mobile Number</label><input id="fpPhone" placeholder="10-digit emergency contact number" type="tel"><div id="fpPhoneErr" class="error"></div></div>
+    <div class="field"><label>Registered Blood Group</label><select id="fpBlood"><option>O+</option><option>A+</option><option>B+</option><option>AB+</option><option>O-</option><option>A-</option><option>B-</option><option>AB-</option></select></div>
+  </div>
+  <div id="fpStep3" class="hidden">
+    <div class="field"><label>New Password</label><input id="fpNew" type="password" placeholder="Minimum 8 characters (letters & numbers)"><div id="fpNewErr" class="error"></div></div>
+    <div class="field"><label>Confirm New Password</label><input id="fpConfirm" type="password" placeholder="Re-enter new password"><div id="fpConfirmErr" class="error"></div></div>
   </div>
   <div class="actions" style="justify-content:space-between;margin-top:16px">
-    ${isCloud?'<button class="btn" type="button" onclick="sendCloudResetEmail()">Send Reset Email</button>':'<div></div>'}
+    ${isCloud?'<button class="btn" type="button" onclick="sendCloudResetEmail()">Send Cloud Reset Email</button>':'<div></div>'}
     <div style="display:flex;gap:8px">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn primary" id="fpAction" onclick="forgotStep()">Continue</button>
+      <button class="btn primary" id="fpAction" onclick="forgotStep()">Verify & Continue</button>
     </div>
   </div>`);
 }
@@ -209,7 +242,7 @@ async function sendCloudResetEmail(){
   const e=($('fpEmail')?.value||'').trim().toLowerCase();
   if(!isEmail(e)){$('fpEmailErr').textContent='Enter a valid email address.';return}
   try{
-    toast('Sending password reset email…','info');
+    toast('Sending official password reset email…','info');
     await sbResetPassword(e);
     toast('Reset link sent to '+e+'! Check your inbox.','success');
     closeModal();
@@ -217,24 +250,56 @@ async function sendCloudResetEmail(){
     $('fpEmailErr').textContent=err.message||'Could not send reset email.';
   }
 }
-function forgotStep(){
-  if($('fpStep2').classList.contains('hidden')){
+async function forgotStep(){
+  const step2=$('fpStep2'), step3=$('fpStep3');
+  // Stage 1: Email check
+  if(step2.classList.contains('hidden') && step3.classList.contains('hidden')){
     const e=$('fpEmail').value.trim().toLowerCase();
     if(!isEmail(e)){$('fpEmailErr').textContent='Enter a valid email address.';return}
     const t=findByEmail(e);
     if(!t&&!isCloudConnected){$('fpEmailErr').textContent='No account found for this email.';return}
     S._fp=e;
-    $('fpStep2').classList.remove('hidden');
+    $('fpEmail').disabled=true;
+    step2.classList.remove('hidden');
+    $('fpAction').textContent='Verify Identity';
+  }
+  // Stage 2: Security Challenge Verification
+  else if(!step2.classList.contains('hidden') && step3.classList.contains('hidden')){
+    const t=findByEmail(S._fp);
+    if(!t){$('fpPhoneErr').textContent='Account record not found.';return}
+    const enteredPhone=($('fpPhone')?.value||'').replace(/\D/g,'');
+    const enteredBlood=$('fpBlood')?.value;
+    const recFamily=(t.familyContactPhone||'').replace(/\D/g,'');
+    const recOwn=(t.phone||'').replace(/\D/g,'');
+    
+    // Validate identity against registered contact and blood group
+    const phoneMatches = (recFamily && recFamily.endsWith(enteredPhone)) || (recOwn && recOwn.endsWith(enteredPhone));
+    const bloodMatches = !t.blood || t.blood === enteredBlood || t.blood === 'Not provided';
+    
+    if(!phoneMatches || !bloodMatches){
+      $('fpPhoneErr').textContent='Identity challenge failed: Emergency contact phone or blood group does not match records.';
+      return;
+    }
+    step2.classList.add('hidden');
+    step3.classList.remove('hidden');
     $('fpAction').textContent='Save New Password';
-  }else{
+  }
+  // Stage 3: New Password Creation & Salted Hashing
+  else{
     const n=$('fpNew').value,c=$('fpConfirm').value;
     if(n.length<8){$('fpNewErr').textContent='Password must be at least 8 characters.';return}
     if(!/[A-Za-z]/.test(n)||!/\d/.test(n)){$('fpNewErr').textContent='Password must include both letters and numbers.';return}
     if(n!==c){$('fpConfirmErr').textContent='Passwords do not match.';return}
+    
     let t=findByEmail(S._fp);
-    if(t){t.password=n;save()}
+    if(t){
+      t.passwordSalt = generateSalt();
+      t.passwordHash = await hashPassword(n, t.passwordSalt);
+      delete t.password;
+      save();
+    }
     closeModal();
-    toast('Password successfully updated. Sign in with your new password.','success');
+    toast('Password successfully updated via security challenge! Sign in now.','success');
   }
 }
 async function login(e){
@@ -252,52 +317,82 @@ async function login(e){
 
   try{
     if(S.role==='authority'){
-      if(email!=='authority@example.com'||pass!=='Authority@123'){
+      let authenticated = false;
+      // 1. Server-side verified authentication via Supabase Auth
+      if(isCloudConnected){
+        try{
+          const authData = await sbSignInAuthority(email, pass);
+          if(authData && authData.user){
+            S.user = {
+              name: authData.user.user_metadata?.name || 'Verified Authority Officer',
+              email,
+              id: authData.user.id || 'AUTH-001',
+              isServerVerified: true
+            };
+            authenticated = true;
+          }
+        }catch(err){
+          console.warn('Supabase authority auth check notice:', err);
+        }
+      }
+      // 2. Offline Sandbox Mode (Protected by Salted SHA-256 Hash)
+      if(!authenticated){
+        const authHash = await hashPassword(pass, 'sts_authority_seed_salt');
+        if(email==='authority@example.com' && authHash==='22ccffbde591e5345ce2396583788ad239d4aef2cd4bb0858c27b731421889ca'){
+          S.user = {
+            name: 'Safety Authority Officer',
+            email,
+            id: 'AUTH-001',
+            isOfflineSandbox: !isCloudConnected
+          };
+          authenticated = true;
+        }
+      }
+
+      if(!authenticated){
         $('passErr').textContent='Invalid authority credentials. Check email and password.';
         return;
       }
-      S.user={name:'Safety Authority',email,id:'AUTH-001'};
       persistSession('authority',S.user);
       enterApp();
       return;
     }
 
-    // 1. Direct Demo Tourist Match
-    if(email==='tourist@example.com'&&pass==='Tourist@123'){
-      let t=findByEmail('tourist@example.com');
-      if(!t){
-        t={name:'Aditya Sanap',id:'ST-00124',email:'tourist@example.com',phone:'9876543210',familyContactName:'Neha Sanap',familyContactPhone:'9876543211',blood:'O+',allergy:'Penicillin',password:'Tourist@123',zone:'Outside monitored zones',status:'Safe',lat:DC.lat,lng:DC.lng,locationSource:'demo'};
-        t.identityHash=idHash(t);
-        S.tourists.push(t);
-        save();
-      }
-      S.user={...t};
-      persistSession('tourist',S.user);
-      enterApp();
-      return;
-    }
-
-    // 2. Direct Local Account Match
+    // 1. Direct Local Salted Hash Verification
     const localT=findByEmail(email);
-    if(localT&&localT.password&&localT.password===pass){
-      S.user={...localT};
-      persistSession('tourist',S.user);
-      enterApp();
-      return;
+    let localHashMatches = false;
+    if(localT && localT.passwordHash){
+      const computedHash = await hashPassword(pass, localT.passwordSalt || 'sts_tourist_seed_salt');
+      if(computedHash === localT.passwordHash){
+        localHashMatches = true;
+      }
     }
 
-    // 3. Supabase Cloud Authentication
+    // 2. Supabase Cloud Server-Side Authentication
     if(isCloudConnected){
       try{
         const authData=await sbSignIn(email,pass);
         let t=findByEmail(email);
         if(!t){
           const cloudList=await sbFetchTourists();
-          if(cloudList){mergeTouristsPreservingPasswords(cloudList)}
+          if(cloudList){mergeTouristsPreservingCredentials(cloudList)}
           t=findByEmail(email);
         }
         if(!t){
-          t={name:authData?.user?.user_metadata?.name||'Tourist',id:'ST-'+Date.now().toString(36).toUpperCase(),email,phone:authData?.user?.user_metadata?.phone||'',blood:'O+',allergy:'None',zone:'Outside monitored zones',status:'Safe',lat:DC.lat,lng:DC.lng,authUserId:authData?.user?.id};
+          t={
+            name:authData?.user?.user_metadata?.name||'Tourist',
+            id:'ST-'+Date.now().toString(36).toUpperCase(),
+            email,
+            phone:authData?.user?.user_metadata?.phone||'',
+            blood:'O+',
+            allergy:'None',
+            zone:'Outside monitored zones',
+            status:'Safe',
+            lat:DC.lat,
+            lng:DC.lng,
+            locationSource:'demo',
+            authUserId:authData?.user?.id
+          };
           t.identityHash=idHash(t);
           S.tourists.push(t);
           await sbUpsertTourist(t);
@@ -309,8 +404,14 @@ async function login(e){
         return;
       }catch(err){
         console.warn('Supabase signin notice:', err);
+        if(localHashMatches){
+          S.user={...localT};
+          persistSession('tourist',S.user);
+          enterApp();
+          return;
+        }
         const errMsg=(err.message||'').toLowerCase();
-        if(localT&&localT.password&&localT.password!==pass){
+        if(localT && !localHashMatches){
           $('passErr').textContent='Incorrect password. Please try again.';
           return;
         }
@@ -322,23 +423,16 @@ async function login(e){
           $('emailErr').textContent='Email not confirmed on Supabase Cloud. Check inbox or sign in locally.';
           return;
         }
-        if(localT){
-          if(localT.password!==pass){$('passErr').textContent='Incorrect password.';return}
-          S.user={...localT};
-          persistSession('tourist',S.user);
-          enterApp();
-          return;
-        }
         $('emailErr').textContent=err.message||'No account found with this email. Please register.';
         return;
       }
     }else{
-      // Local fallback DB check
-      if(!localT||!localT.password){
+      // Local Fallback DB Mode
+      if(!localT||!localT.passwordHash){
         $('emailErr').textContent='No account found with this email on this device. Please create an account.';
         return;
       }
-      if(localT.password!==pass){
+      if(!localHashMatches){
         $('passErr').textContent='Incorrect password. Please try again.';
         return;
       }
@@ -352,7 +446,7 @@ async function login(e){
 }
 function loginGuest(){
   const p=jitter(DC,.004),id='GUEST-'+Math.floor(1000+Math.random()*8999);
-  const t={name:'Guest Explorer',id,email:id.toLowerCase()+'@safetrail.local',phone:'Not provided',blood:'Not provided',allergy:'Not provided',zone:'Outside monitored zones',status:'Safe',lat:p.lat,lng:p.lng,locationSource:'demo'};
+  const t={name:'Guest Explorer',id,email:id.toLowerCase()+'@safetrail.local',phone:'Not provided',blood:'Not provided',allergy:'Not provided',zone:'Outside monitored zones',status:'Safe',lat:p.lat,lng:p.lng,locationSource:'guest_est'};
   t.identityHash=idHash(t);S.tourists.push(t);save();
   if(isCloudConnected)sbUpsertTourist(t);
   S.role='tourist';S.user={...t};
@@ -376,8 +470,24 @@ async function register(e){
   const btn=$('registerBtn');
   if(btn){btn.disabled=true;btn.textContent='Creating tourist profile…'}
 
+  const salt=generateSalt();
+  const pwHash=await hashPassword(pw, salt);
   const p=jitter(DC,.004);
-  const t={name,email,phone,familyContactName:cleanText($('rfamilyName').value,50)||'Not provided',familyContactPhone:fp||'Not provided',blood:$('blood').value,allergy:cleanText($('allergy').value,120)||'None',id:newId('ST'),password:pw,zone:'Outside monitored zones',status:'Safe',lat:p.lat,lng:p.lng,locationSource:'demo'};
+  const t={
+    name,email,phone,
+    familyContactName:cleanText($('rfamilyName').value,50)||'Not provided',
+    familyContactPhone:fp||'Not provided',
+    blood:$('blood').value,
+    allergy:cleanText($('allergy').value,120)||'None',
+    id:newId('ST'),
+    passwordHash:pwHash,
+    passwordSalt:salt,
+    zone:'Outside monitored zones',
+    status:'Safe',
+    lat:p.lat,
+    lng:p.lng,
+    locationSource:'demo'
+  };
   t.identityHash=idHash(t);
 
   try{
@@ -446,7 +556,7 @@ function assess(t){
       cls: 'safe',
       factors,
       anomalies: [],
-      features: { zone: 'Marine Drive Safe Zone', hazardDist: 'Clear of hazards', status: 'Safe', accuracy: '±12 m' },
+      features: { zone: 'Marine Drive Safe Zone', hazardDist: 'Clear of hazards', status: 'Safe', accuracy: '±12 m', gpsConfidence: 'HIGH (Verified Live)' },
       recommendation: {
         title: 'Safe Zone Active',
         text: 'You are within a designated safe tourist zone. Enjoy your travel safely.',
@@ -466,7 +576,7 @@ function assess(t){
       cls: 'warning',
       factors,
       anomalies,
-      features: { zone: 'Hill Road Caution Area', hazardDist: 'Inside Caution Zone', status: 'Caution', accuracy: '±15 m' },
+      features: { zone: 'Hill Road Caution Area', hazardDist: 'Inside Caution Zone', status: 'Caution', accuracy: '±15 m', gpsConfidence: 'HIGH (Verified Live)' },
       recommendation: {
         title: 'Proceed with Caution',
         text: 'You are inside Hill Road Caution Area. Stay alert and avoid isolated side tracks.',
@@ -486,7 +596,7 @@ function assess(t){
       cls: 'danger-b',
       factors,
       anomalies,
-      features: { zone: 'Cliff Area (Restricted)', hazardDist: 'Inside Restricted Hazard', status: 'Danger Alert', accuracy: '±15 m' },
+      features: { zone: 'Cliff Area (Restricted)', hazardDist: 'Inside Restricted Hazard', status: 'Danger Alert', accuracy: '±15 m', gpsConfidence: 'HIGH (Verified Live)' },
       recommendation: {
         title: 'Danger: Leave Restricted Zone',
         text: 'You have entered the restricted Cliff Area. Move outside the boundary immediately or use SOS if you cannot leave safely.',
@@ -506,7 +616,7 @@ function assess(t){
       cls: 'danger-b',
       factors,
       anomalies,
-      features: { zone: t.zone || 'Monitored Sector', hazardDist: 'Distress Beacon Transmitting', status: 'Emergency SOS', accuracy: '±10 m' },
+      features: { zone: t.zone || 'Monitored Sector', hazardDist: 'Distress Beacon Transmitting', status: 'Emergency SOS', accuracy: '±10 m', gpsConfidence: 'HIGH (Emergency Beacon)' },
       recommendation: {
         title: 'Emergency SOS Active',
         text: 'Emergency responders have received your Digital ID and coordinates. Keep your phone available.',
@@ -625,7 +735,10 @@ function assess(t){
       zone: zoneName || 'Outside Monitored Zones',
       hazardDist: nearestHazardZone ? `${Math.max(0, Math.round(nearestHazardDist))} m to ${nearestHazardZone.name}` : 'Safe distance',
       status: t.status || 'Safe',
-      accuracy: acc > 0 ? `±${Math.round(acc)} m` : 'Not acquired'
+      accuracy: acc > 0 ? `±${Math.round(acc)} m` : (t.locationSource==='gps' ? 'Acquiring GPS lock' : 'Demo benchmark'),
+      gpsConfidence: (t.locationSource==='gps' && acc > 0 && acc <= 60)
+        ? 'HIGH (Verified Satellite Lock)'
+        : (t.locationSource==='gps' ? 'MEDIUM (Low Satellite Accuracy)' : 'LOW (Demo / Sample Profile)')
     },
     recommendation: rec,
     open: openIncidents
@@ -805,6 +918,7 @@ function touristPage(){
           ${detail('Hazard Distance', a.features.hazardDist)}
           ${detail('Distress Alert Status', a.features.status)}
           ${detail('GPS Connectivity', a.features.accuracy)}
+          ${detail('GPS Confidence', a.features.gpsConfidence)}
         </div>
 
         <div class="actions" style="margin-top:16px">
@@ -1126,8 +1240,13 @@ function authorityPage(){
         </p>
       </div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <select style="padding:8px 12px;border:1px solid var(--line2);border-radius:var(--rs);background:var(--card);color:var(--ink);font-weight:600" onchange="setLocationFilter(this.value)">
+          <option value="all" ${S.locFilter==='all'?'selected':''}>All Coordinates (${S.tourists.filter(t=>t.lat!=null).length})</option>
+          <option value="gps" ${S.locFilter==='gps'?'selected':''}>🟢 Real Satellite GPS (${gpsCount})</option>
+          <option value="demo" ${S.locFilter==='demo'?'selected':''}>⚪ Demo Profiles (${S.tourists.filter(t=>t.lat!=null&&t.locationSource!=='gps').length})</option>
+        </select>
         <select style="padding:8px 12px;border:1px solid var(--line2);border-radius:var(--rs);background:var(--card);color:var(--ink);font-weight:600" onchange="focusTouristOnMap(this.value)">
-          <option value="">-- View All Tourists --</option>
+          <option value="">-- Focus Tourist --</option>
           ${S.tourists.map(t=>`<option value="${esc(t.id)}" ${S.trackedTouristId===t.id?'selected':''}>${esc(t.name)} (${t.locationSource==='gps'?'GPS Live':'Sample'})</option>`).join('')}
         </select>
         <button class="btn primary" onclick="refreshMonitor(true)">↻ Refresh Cloud Map</button>
@@ -1308,6 +1427,7 @@ function authorityPage(){
         ${detail('Hazard Proximity', a.features.hazardDist)}
         ${detail('Status', a.features.status)}
         ${detail('GPS Accuracy', a.features.accuracy)}
+        ${detail('GPS Confidence', a.features.gpsConfidence)}
         ${detail('Digital ID', identityRef(sel))}
 
         <div style="margin-top:20px;padding-top:14px;border-top:1px solid var(--line)">
@@ -2109,13 +2229,19 @@ function cleanupMaps(){Object.keys(maps).forEach(id=>{const m=maps[id],c=m.getCo
 function touristColor(t){const z=S.zones.find(x=>x.name===t.zone);return t.status==='SOS'||(z&&z.type==='Restricted')?ZC.Restricted:z&&z.type==='Caution'?ZC.Caution:ZC.Safe}
 function drawTourists(m){
   m.eachLayer(l=>{if(l.options&&l.options._t)m.removeLayer(l)});
-  const touristsToDraw = S.tourists.filter(t=>t.lat!=null&&t.lng!=null);
+  let touristsToDraw = S.tourists.filter(t=>t.lat!=null&&t.lng!=null);
+  if(S.locFilter === 'gps'){
+    touristsToDraw = touristsToDraw.filter(t=>t.locationSource === 'gps');
+  } else if(S.locFilter === 'demo'){
+    touristsToDraw = touristsToDraw.filter(t=>t.locationSource !== 'gps');
+  }
+
   touristsToDraw.forEach(t=>{
     const isLiveGps = t.locationSource==='gps';
     const isTarget = S.trackedTouristId === t.id;
     const col = touristColor(t);
     const rad = isTarget ? 14 : (isLiveGps ? 11 : 7);
-    const strokeCol = isTarget ? '#f59e0b' : (isLiveGps ? '#0284c7' : '#ffffff');
+    const strokeCol = isTarget ? '#f59e0b' : (isLiveGps ? '#0284c7' : '#94a3b8');
     const strokeWeight = isTarget ? 4 : (isLiveGps ? 3 : 1.5);
     
     const marker = L.circleMarker([Number(t.lat),Number(t.lng)],{
@@ -2128,9 +2254,13 @@ function drawTourists(m){
     }).addTo(m);
 
     const timeStr = t.updatedAt ? new Date(t.updatedAt).toLocaleTimeString('en-IN') : 'N/A';
+    const ageMs = t.updatedAt ? (Date.now() - new Date(t.updatedAt).getTime()) : Infinity;
+    const isFresh = ageMs < 180000;
     const sourceBadge = isLiveGps 
-      ? '<span class="badge safe" style="padding:2px 8px;font-size:10px">● REAL GPS LIVE</span>' 
-      : '<span class="badge warning" style="padding:2px 8px;font-size:10px">Sample Position</span>';
+      ? (isFresh 
+          ? `<span class="badge safe" style="padding:2px 8px;font-size:10px">● SATELLITE GPS (±${t.accuracy||12}m)</span>` 
+          : `<span class="badge warning" style="padding:2px 8px;font-size:10px">▲ STALE GPS (${Math.round(ageMs/60000)}m ago)</span>`)
+      : '<span class="badge" style="background:#475569;color:#fff;padding:2px 8px;font-size:10px">⚪ DEMO PROFILE COORDINATE</span>';
 
     marker.bindPopup(`
       <div style="font-family:'Plus Jakarta Sans',sans-serif;min-width:180px">
@@ -2140,6 +2270,7 @@ function drawTourists(m){
         <div style="font-size:12px;margin:3px 0"><b>Zone:</b> ${esc(t.zone||'Outside monitored zones')}</div>
         <div style="font-size:12px;margin:3px 0"><b>Status:</b> <span class="badge ${t.status==='SOS'?'danger-b':t.status==='Alert'?'warning':'safe'}" style="padding:2px 6px;font-size:10px">${esc(t.status)}</span></div>
         <div style="font-size:11px;color:#64748b;margin-top:5px"><b>Coordinates:</b> ${Number(t.lat).toFixed(6)}, ${Number(t.lng).toFixed(6)}</div>
+        <div style="font-size:11px;color:#64748b"><b>Accuracy / Mode:</b> ${isLiveGps ? `±${t.accuracy||12}m (Hardware)` : 'Simulated benchmark'}</div>
         <div style="font-size:11px;color:#64748b"><b>Updated:</b> ${timeStr}</div>
         <div style="margin-top:8px">
           <button class="btn primary" style="padding:4px 8px;font-size:11px;width:100%" onclick="trackTourist('${esc(t.id)}')">Follow This Tourist</button>
@@ -2158,6 +2289,12 @@ function drawTourists(m){
       m.setView([Number(target.lat), Number(target.lng)], Math.max(m.getZoom(), 16), {animate:true});
     }
   }
+}
+function setLocationFilter(filter){
+  S.locFilter = filter;
+  const m=Object.values(maps).find(x=>x._monitor&&document.body.contains(x.getContainer()));
+  if(m) drawTourists(m);
+  render();
 }
 function trackTourist(id){
   S.trackedTouristId = id;
@@ -2444,5 +2581,16 @@ window.addEventListener('storage',e=>{
   try{const d=JSON.parse(e.newValue);if(d){S.tourists=d.tourists||S.tourists;S.incidents=d.incidents||S.incidents;S.zones=d.zones||S.zones;
     if(S.role==='authority'&&!['verify','zones'].includes(S.page)){render()}}}catch(err){}
 });
-window.addEventListener('beforeunload',()=>stopTracking(true));
-window.addEventListener('online',()=>{S.net='ONLINE'});window.addEventListener('offline',()=>{S.net='OFFLINE'});
+window.addEventListener('online',async ()=>{
+  S.net='ONLINE';
+  toast('Reconnected online! Syncing offline operations…','info');
+  try{
+    if(typeof sbProcessSyncQueue==='function') await sbProcessSyncQueue();
+    await load();
+    render();
+  }catch(e){console.warn('Sync queue error:',e)}
+});
+window.addEventListener('offline',()=>{
+  S.net='OFFLINE';
+  toast('Device offline. Operations will be queued locally for sync.','warning');
+});

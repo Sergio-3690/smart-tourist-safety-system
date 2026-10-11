@@ -100,48 +100,72 @@ alter table public.tourists enable row level security;
 alter table public.incidents enable row level security;
 alter table public.safety_zones enable row level security;
 
--- Tourists Policies
+-- Helper function to identify verified authority accounts via JWT metadata
+create or replace function public.is_authority()
+returns boolean language sql security definer set search_path = public as $$
+  select coalesce(
+    (nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'app_metadata' ->> 'role') = 'authority',
+    (nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'user_metadata' ->> 'role') = 'authority',
+    false
+  );
+$$;
+
+-- 4.1 Tourists Policies: Strict personal data isolation & authority monitoring
 drop policy if exists "allow authenticated tourist read" on public.tourists;
-create policy "allow authenticated tourist read" on public.tourists 
-  for select to authenticated, anon using (true);
+create policy "tourists read own profile or authority read all" on public.tourists 
+  for select to authenticated
+  using (auth.uid() = auth_user_id or public.is_authority());
 
 drop policy if exists "allow authenticated tourist insert" on public.tourists;
-create policy "allow authenticated tourist insert" on public.tourists 
-  for insert to authenticated, anon with check (true);
+create policy "tourists insert own profile" on public.tourists 
+  for insert to authenticated
+  with check (auth.uid() = auth_user_id or public.is_authority());
 
 drop policy if exists "allow authenticated tourist update" on public.tourists;
-create policy "allow authenticated tourist update" on public.tourists 
-  for update to authenticated, anon using (true) with check (true);
+create policy "tourists update own profile or authority update status" on public.tourists 
+  for update to authenticated
+  using (auth.uid() = auth_user_id or public.is_authority())
+  with check (auth.uid() = auth_user_id or public.is_authority());
 
--- Incidents Policies
+-- 4.2 Incidents Policies: Tourists log personal alerts; Authority manages dispatch
 drop policy if exists "allow anyone read incidents" on public.incidents;
-create policy "allow anyone read incidents" on public.incidents 
-  for select to authenticated, anon using (true);
+create policy "tourists read own incidents or authority read all" on public.incidents 
+  for select to authenticated
+  using (auth.uid() = auth_user_id or public.is_authority());
 
 drop policy if exists "allow anyone insert incidents" on public.incidents;
-create policy "allow anyone insert incidents" on public.incidents 
-  for insert to authenticated, anon with check (true);
+create policy "tourists create own incidents or authority create" on public.incidents 
+  for insert to authenticated
+  with check (auth.uid() = auth_user_id or public.is_authority());
 
 drop policy if exists "allow anyone update incidents" on public.incidents;
-create policy "allow anyone update incidents" on public.incidents 
-  for update to authenticated, anon using (true) with check (true);
+create policy "authority only update and resolve incidents" on public.incidents 
+  for update to authenticated
+  using (public.is_authority())
+  with check (public.is_authority());
 
--- Safety Zones Policies
+-- 4.3 Safety Zones Policies: Public read-only for maps; Authority only for editing
 drop policy if exists "anyone can read safety zones" on public.safety_zones;
 create policy "anyone can read safety zones" on public.safety_zones 
-  for select to anon, authenticated using (true);
+  for select to anon, authenticated
+  using (true);
 
 drop policy if exists "anyone can insert safety zones" on public.safety_zones;
-create policy "anyone can insert safety zones" on public.safety_zones 
-  for insert to anon, authenticated with check (true);
+create policy "authority only insert safety zones" on public.safety_zones 
+  for insert to authenticated
+  with check (public.is_authority());
 
 drop policy if exists "anyone can update safety zones" on public.safety_zones;
-create policy "anyone can update safety zones" on public.safety_zones 
-  for update to anon, authenticated using (true) with check (true);
+create policy "authority only update safety zones" on public.safety_zones 
+  for update to authenticated
+  using (public.is_authority())
+  with check (public.is_authority());
 
 drop policy if exists "anyone can delete safety zones" on public.safety_zones;
-create policy "anyone can delete safety zones" on public.safety_zones 
-  for delete to anon, authenticated using (true);
+create policy "authority only delete safety zones" on public.safety_zones 
+  for delete to authenticated
+  using (public.is_authority());
+
 
 -- ----------------------------------------------------------------------------
 -- 5. INITIAL SEED DATA

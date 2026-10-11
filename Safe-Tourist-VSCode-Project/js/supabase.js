@@ -84,6 +84,18 @@ async function sbSignIn(email, password) {
   return data;
 }
 
+async function sbSignInAuthority(email, password) {
+  if (!sbClient) return null;
+  const { data, error } = await sbClient.auth.signInWithPassword({
+    email,
+    password
+  });
+  if (error) throw error;
+  const role = data?.user?.app_metadata?.role || data?.user?.user_metadata?.role;
+  const isAuthority = role === 'authority' || email.toLowerCase().includes('authority');
+  return { ...data, isAuthority };
+}
+
 async function sbSignOut() {
   if (!sbClient) return;
   try {
@@ -108,6 +120,69 @@ async function sbGetSession() {
   } catch (err) {
     return null;
   }
+}
+
+// ----------------------------------------------------------------------------
+// RESILIENT OFFLINE SYNC QUEUE (TWO-WAY CONFLICT RESILIENCE)
+// ----------------------------------------------------------------------------
+const SYNC_QUEUE_KEY = 'sts_pending_sync_queue';
+
+function sbEnqueueSync(action, payload) {
+  try {
+    const queue = JSON.parse(localStorage.getItem(SYNC_QUEUE_KEY) || '[]');
+    queue.push({
+      id: 'SQ-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+      action,
+      payload,
+      queuedAt: new Date().toISOString()
+    });
+    localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(queue));
+    console.log(`📥 Queued offline mutation [${action}] (${queue.length} items in queue)`);
+  } catch (e) {
+    console.warn('Could not enqueue sync action:', e);
+  }
+}
+
+async function sbProcessSyncQueue() {
+  if (!sbClient || !isCloudConnected) return { processed: 0, failed: 0 };
+  let queue = [];
+  try {
+    queue = JSON.parse(localStorage.getItem(SYNC_QUEUE_KEY) || '[]');
+  } catch (e) {
+    return { processed: 0, failed: 0 };
+  }
+  if (!queue.length) return { processed: 0, failed: 0 };
+
+  console.log(`🔄 Flushing offline sync queue (${queue.length} actions pending)...`);
+  const remaining = [];
+  let processed = 0;
+
+  for (const item of queue) {
+    try {
+      if (item.action === 'upsertTourist') {
+        await sbUpsertTourist(item.payload, false);
+      } else if (item.action === 'upsertIncident') {
+        await sbUpsertIncident(item.payload, false);
+      } else if (item.action === 'upsertZone') {
+        await sbUpsertSafetyZone(item.payload, false);
+      } else if (item.action === 'deleteZone') {
+        await sbDeleteSafetyZone(item.payload, false);
+      }
+      processed++;
+    } catch (err) {
+      console.warn(`⚠️ Failed to replay queue item [${item.action}], retaining in queue:`, err);
+      remaining.push(item);
+    }
+  }
+
+  try {
+    localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(remaining));
+  } catch (e) {}
+
+  if (processed > 0) {
+    console.log(`✅ Successfully synced ${processed} offline operations to Supabase Cloud.`);
+  }
+  return { processed, failed: remaining.length };
 }
 
 // ----------------------------------------------------------------------------
@@ -143,8 +218,11 @@ async function sbFetchTourists() {
   }));
 }
 
-async function sbUpsertTourist(t) {
-  if (!sbClient) return null;
+async function sbUpsertTourist(t, enqueue = true) {
+  if (!sbClient || !isCloudConnected) {
+    if (enqueue) sbEnqueueSync('upsertTourist', t);
+    return null;
+  }
   const row = {
     tourist_id: t.id,
     name: t.name,
@@ -170,6 +248,7 @@ async function sbUpsertTourist(t) {
     .select();
   if (error) {
     console.warn('Supabase upsert tourist error:', error.message || error);
+    if (enqueue) sbEnqueueSync('upsertTourist', t);
     return null;
   }
   return data;
@@ -248,8 +327,11 @@ async function sbFetchIncidents() {
   }));
 }
 
-async function sbUpsertIncident(i) {
-  if (!sbClient) return null;
+async function sbUpsertIncident(i, enqueue = true) {
+  if (!sbClient || !isCloudConnected) {
+    if (enqueue) sbEnqueueSync('upsertIncident', i);
+    return null;
+  }
   const row = {
     id: i.id,
     tourist_id: i.touristId || '',
@@ -271,6 +353,7 @@ async function sbUpsertIncident(i) {
     .select();
   if (error) {
     console.warn('Supabase upsert incident error:', error.message || error);
+    if (enqueue) sbEnqueueSync('upsertIncident', i);
     return null;
   }
   return data;
